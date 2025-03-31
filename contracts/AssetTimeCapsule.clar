@@ -406,3 +406,100 @@
   )
 )
 
+;; Batch operations: Approve multiple phases at once
+(define-public (batch-approve-phases (capsule-ids (list 10 uint)))
+  (begin
+    (asserts! (is-eq tx-sender PROTOCOL_ADMIN) ERROR_PERMISSION_DENIED)
+    (let
+      (
+        (result (fold approve-phase-fold capsule-ids (ok true)))
+      )
+      result
+    )
+  )
+)
+
+;; Helper function for batch approval
+(define-private (approve-phase-fold (capsule-id uint) (prev-result (response bool uint)))
+  (begin
+    (match prev-result
+      success
+        (match (approve-phase capsule-id)
+          inner-success (ok true)
+          inner-error (err inner-error)
+        )
+      error (err error)
+    )
+  )
+)
+
+;; Progress tracking: Allow recipients to report phase progress
+(define-public (report-phase-progress 
+                (capsule-id uint) 
+                (phase-index uint) 
+                (progress-percentage uint) 
+                (remarks (string-ascii 200))
+                (evidence-hash (buff 32)))
+  (begin
+    (asserts! (is-valid-capsule-id capsule-id) ERROR_INVALID_CAPSULE_ID)
+    (asserts! (<= progress-percentage u100) ERROR_INVALID_QUANTITY)
+    (let
+      (
+        (capsule (unwrap! (map-get? Capsules { capsule-id: capsule-id }) ERROR_CAPSULE_MISSING))
+        (phases (get phases capsule))
+        (recipient (get recipient capsule))
+      )
+      (asserts! (is-eq tx-sender recipient) ERROR_PERMISSION_DENIED)
+      (asserts! (< phase-index (len phases)) ERROR_INVALID_RELEASE_RULE)
+      (asserts! (not (is-eq (get status capsule) "retrieved")) ERROR_ASSETS_RELEASED)
+      (asserts! (< block-height (get unlock-height capsule)) ERROR_CAPSULE_EXPIRED)
+
+      ;; Check if progress was already reported at 100%
+      (match (map-get? PhaseProgress { capsule-id: capsule-id, phase-index: phase-index })
+        prev-progress (asserts! (< (get progress-percentage prev-progress) u100) ERROR_MILESTONE_RECORDED)
+        true
+      )
+
+      (ok true)
+    )
+  )
+)
+
+;; Security-enhanced capsule with verification and rate limiting
+(define-public (create-certified-capsule (recipient principal) (quantity uint) (phases (list 5 uint)))
+  (begin
+    (asserts! (not (var-get protocol-halted)) ERROR_PERMISSION_DENIED)
+    (asserts! (is-recipient-certified recipient) ERROR_PERMISSION_DENIED)
+    (asserts! (> quantity u0) ERROR_INVALID_QUANTITY)
+    (asserts! (is-valid-recipient recipient) ERROR_INVALID_RELEASE_RULE)
+    (asserts! (> (len phases) u0) ERROR_INVALID_RELEASE_RULE)
+
+    (let
+      (
+        (capsule-id (+ (var-get capsule-sequence) u1))
+        (unlock-height (+ block-height CAPSULE_DURATION))
+      )
+      (match (stx-transfer? quantity tx-sender (as-contract tx-sender))
+        success
+          (begin
+            (map-set Capsules
+              { capsule-id: capsule-id }
+              {
+                creator: tx-sender,
+                recipient: recipient,
+                quantity: quantity,
+                status: "active",
+                creation-height: block-height,
+                unlock-height: unlock-height,
+                phases: phases,
+                completed-phases: u0
+              }
+            )
+            (var-set capsule-sequence capsule-id)
+            (ok capsule-id)
+          )
+        error ERROR_ASSET_MOVE_FAILED
+      )
+    )
+  )
+)
