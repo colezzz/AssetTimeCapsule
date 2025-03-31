@@ -615,3 +615,59 @@
     )
   )
 )
+
+;; Emergency procedures: Override asset retrieval with dual confirmation
+(define-public (emergency-asset-retrieval (capsule-id uint) (justification (string-ascii 100)))
+  (begin
+    (asserts! (is-valid-capsule-id capsule-id) ERROR_INVALID_CAPSULE_ID)
+    (let
+      (
+        (capsule (unwrap! (map-get? Capsules { capsule-id: capsule-id }) ERROR_CAPSULE_MISSING))
+        (creator (get creator capsule))
+        (quantity (get quantity capsule))
+        (completed-count (get completed-phases capsule))
+        (remaining-quantity (- quantity (* (/ quantity (len (get phases capsule))) completed-count)))
+        (retrieval-request (default-to 
+                          { admin-confirmed: false, creator-confirmed: false, justification: justification }
+                          (map-get? RetrievalRequests { capsule-id: capsule-id })))
+      )
+      (asserts! (or (is-eq tx-sender PROTOCOL_ADMIN) (is-eq tx-sender creator)) ERROR_PERMISSION_DENIED)
+      (asserts! (not (is-eq (get status capsule) "retrieved")) ERROR_ASSETS_RELEASED)
+      (asserts! (not (is-eq (get status capsule) "retrieved")) ERROR_ASSETS_RELEASED)
+
+      ;; Set confirmations based on who called the function
+      (if (is-eq tx-sender PROTOCOL_ADMIN)
+        (map-set RetrievalRequests
+          { capsule-id: capsule-id }
+          (merge retrieval-request { admin-confirmed: true, justification: justification })
+        )
+        (map-set RetrievalRequests
+          { capsule-id: capsule-id }
+          (merge retrieval-request { creator-confirmed: true, justification: justification })
+        )
+      )
+
+      ;; Check if both have confirmed
+      (let
+        (
+          (updated-request (unwrap! (map-get? RetrievalRequests { capsule-id: capsule-id }) ERROR_CAPSULE_MISSING))
+        )
+        (if (and (get admin-confirmed updated-request) (get creator-confirmed updated-request))
+          (match (stx-transfer? remaining-quantity (as-contract tx-sender) creator)
+            success
+              (begin
+                (map-set Capsules
+                  { capsule-id: capsule-id }
+                  (merge capsule { status: "retrieved" })
+                )
+                (ok true)
+              )
+            error ERROR_ASSET_MOVE_FAILED
+          )
+          (ok false)
+        )
+      )
+    )
+  )
+)
+
