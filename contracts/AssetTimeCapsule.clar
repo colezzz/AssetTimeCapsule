@@ -346,3 +346,63 @@
   )
 )
 
+;; Asset management: Increase capsule quantity
+(define-public (augment-capsule (capsule-id uint) (additional-quantity uint))
+  (begin
+    (asserts! (is-valid-capsule-id capsule-id) ERROR_INVALID_CAPSULE_ID)
+    (asserts! (> additional-quantity u0) ERROR_INVALID_QUANTITY)
+    (let
+      (
+        (capsule (unwrap! (map-get? Capsules { capsule-id: capsule-id }) ERROR_CAPSULE_MISSING))
+        (creator (get creator capsule))
+        (current-quantity (get quantity capsule))
+      )
+      (asserts! (is-eq tx-sender creator) ERROR_PERMISSION_DENIED)
+      (asserts! (< block-height (get unlock-height capsule)) ERROR_CAPSULE_EXPIRED)
+      (match (stx-transfer? additional-quantity tx-sender (as-contract tx-sender))
+        success
+          (begin
+            (map-set Capsules
+              { capsule-id: capsule-id }
+              (merge capsule { quantity: (+ current-quantity additional-quantity) })
+            )
+            (ok true)
+          )
+        error ERROR_ASSET_MOVE_FAILED
+      )
+    )
+  )
+)
+
+;; Access management: Assign proxy control to a third party
+(define-public (assign-capsule-proxy 
+                (capsule-id uint) 
+                (proxy principal) 
+                (can-cancel bool)
+                (can-extend bool)
+                (can-augment bool)
+                (proxy-duration uint))
+  (begin
+    (asserts! (is-valid-capsule-id capsule-id) ERROR_INVALID_CAPSULE_ID)
+    (asserts! (> proxy-duration u0) ERROR_INVALID_QUANTITY)
+    (let
+      (
+        (capsule (unwrap! (map-get? Capsules { capsule-id: capsule-id }) ERROR_CAPSULE_MISSING))
+        (creator (get creator capsule))
+        (proxy-expiry (+ block-height proxy-duration))
+      )
+      (asserts! (is-eq tx-sender creator) ERROR_PERMISSION_DENIED)
+      (asserts! (< block-height (get unlock-height capsule)) ERROR_CAPSULE_EXPIRED)
+      (asserts! (not (is-eq (get status capsule) "retrieved")) ERROR_ASSETS_RELEASED)
+
+      ;; Check if proxy already assigned
+      (match (map-get? CapsuleProxies { capsule-id: capsule-id })
+        existing-proxy (asserts! (< block-height (get proxy-expiry existing-proxy)) ERROR_PROXY_EXISTS)
+        true
+      )
+
+      (ok true)
+    )
+  )
+)
+
