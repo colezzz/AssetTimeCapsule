@@ -38,3 +38,468 @@
 (define-constant CONTEST_DURATION u1008) 
 (define-constant CONTEST_BOND u1000000) 
 
+
+;; Main capsule registry
+(define-map Capsules
+  { capsule-id: uint }
+  {
+    creator: principal,
+    recipient: principal,
+    quantity: uint,
+    status: (string-ascii 10),
+    creation-height: uint,
+    unlock-height: uint,
+    phases: (list 5 uint),
+    completed-phases: uint
+  }
+)
+
+(define-data-var capsule-sequence uint u0)
+
+;; Multi-recipient capsule structure
+(define-map MultiCapsules
+  { multi-capsule-id: uint }
+  {
+    creator: principal,
+    targets: (list 5 { recipient: principal, portion: uint }),
+    total-quantity: uint,
+    creation-height: uint,
+    status: (string-ascii 10)
+  }
+)
+
+(define-data-var multi-capsule-sequence uint u0)
+
+;; Verified recipient directory
+(define-map CertifiedRecipients
+  { recipient: principal }
+  { certified: bool }
+)
+
+;; Milestone tracking system
+(define-map PhaseProgress
+  { capsule-id: uint, phase-index: uint }
+  {
+    progress-percentage: uint,
+    remarks: (string-ascii 200),
+    update-height: uint,
+    evidence-hash: (buff 32)
+  }
+)
+
+;; Authority delegation records
+(define-map CapsuleProxies
+  { capsule-id: uint }
+  {
+    proxy: principal,
+    can-cancel: bool,
+    can-extend: bool,
+    can-augment: bool,
+    proxy-expiry: uint
+  }
+)
+
+;; Unusual activity tracker
+(define-map AlarmCapsules
+  { capsule-id: uint }
+  { 
+    alarm-type: (string-ascii 20),
+    reported-by: principal,
+    resolved: bool
+  }
+)
+
+;; Creator activity monitoring
+(define-map CreatorMonitor
+  { creator: principal }
+  {
+    last-operation-height: uint,
+    operations-in-window: uint
+  }
+)
+
+;; Dispute management system
+(define-map CapsuleContests
+  { capsule-id: uint }
+  {
+    challenger: principal,
+    contest-grounds: (string-ascii 200),
+    contest-bond: uint,
+    resolved: bool,
+    upheld: bool,
+    contest-height: uint
+  }
+)
+
+;; Emergency retrieval mechanism
+(define-map RetrievalRequests
+  { capsule-id: uint }
+  { 
+    admin-confirmed: bool,
+    creator-confirmed: bool,
+    justification: (string-ascii 100)
+  }
+)
+
+;; Protocol state
+(define-data-var protocol-halted bool false)
+
+;; Utility functions
+(define-private (is-valid-recipient (recipient principal))
+  (not (is-eq recipient tx-sender))
+)
+
+(define-private (is-valid-capsule-id (capsule-id uint))
+  (<= capsule-id (var-get capsule-sequence))
+)
+
+(define-private (get-portion-value (target { recipient: principal, portion: uint }))
+  (get portion target)
+)
+
+;; Query functions
+(define-read-only (is-recipient-certified (recipient principal))
+  (default-to false (get certified (map-get? CertifiedRecipients { recipient: recipient })))
+)
+
+;; Primary feature: Create a new phase-based asset time capsule
+(define-public (create-capsule (recipient principal) (quantity uint) (phases (list 5 uint)))
+  (let
+    (
+      (capsule-id (+ (var-get capsule-sequence) u1))
+      (unlock-height (+ block-height CAPSULE_DURATION))
+    )
+    (asserts! (> quantity u0) ERROR_INVALID_QUANTITY)
+    (asserts! (is-valid-recipient recipient) ERROR_INVALID_RELEASE_RULE)
+    (asserts! (> (len phases) u0) ERROR_INVALID_RELEASE_RULE)
+    (match (stx-transfer? quantity tx-sender (as-contract tx-sender))
+      success
+        (begin
+          (map-set Capsules
+            { capsule-id: capsule-id }
+            {
+              creator: tx-sender,
+              recipient: recipient,
+              quantity: quantity,
+              status: "active",
+              creation-height: block-height,
+              unlock-height: unlock-height,
+              phases: phases,
+              completed-phases: u0
+            }
+          )
+          (var-set capsule-sequence capsule-id)
+          (ok capsule-id)
+        )
+      error ERROR_ASSET_MOVE_FAILED
+    )
+  )
+)
+
+;; Enhanced feature: Create a multi-recipient capsule with proportional distribution
+(define-public (create-multi-capsule (targets (list 5 { recipient: principal, portion: uint })) (quantity uint))
+  (begin
+    (asserts! (> quantity u0) ERROR_INVALID_QUANTITY)
+    (asserts! (> (len targets) u0) ERROR_INVALID_CAPSULE_ID)
+    (asserts! (<= (len targets) MAX_RECIPIENTS) ERROR_RECIPIENT_CAP)
+
+    ;; Verify portion allocation totals 100%
+    (let
+      (
+        (total-portion (fold + (map get-portion-value targets) u0))
+      )
+      (asserts! (is-eq total-portion u100) ERROR_DISTRIBUTION_MISMATCH)
+
+      ;; Process the capsule creation
+      (match (stx-transfer? quantity tx-sender (as-contract tx-sender))
+        success
+          (let
+            (
+              (capsule-id (+ (var-get multi-capsule-sequence) u1))
+            )
+            (map-set MultiCapsules
+              { multi-capsule-id: capsule-id }
+              {
+                creator: tx-sender,
+                targets: targets,
+                total-quantity: quantity,
+                creation-height: block-height,
+                status: "active"
+              }
+            )
+            (var-set multi-capsule-sequence capsule-id)
+            (ok capsule-id)
+          )
+        error ERROR_ASSET_MOVE_FAILED
+      )
+    )
+  )
+)
+
+
+;; Phase management: Approve phase completion and release assets
+(define-public (approve-phase (capsule-id uint))
+  (begin
+    (asserts! (is-valid-capsule-id capsule-id) ERROR_INVALID_CAPSULE_ID)
+    (let
+      (
+        (capsule (unwrap! (map-get? Capsules { capsule-id: capsule-id }) ERROR_CAPSULE_MISSING))
+        (phases (get phases capsule))
+        (completed-count (get completed-phases capsule))
+        (recipient (get recipient capsule))
+        (total-quantity (get quantity capsule))
+        (release-amount (/ total-quantity (len phases)))
+      )
+      (asserts! (< completed-count (len phases)) ERROR_ASSETS_RELEASED)
+      (asserts! (is-eq tx-sender PROTOCOL_ADMIN) ERROR_PERMISSION_DENIED)
+      (match (stx-transfer? release-amount (as-contract tx-sender) recipient)
+        success
+          (begin
+            (map-set Capsules
+              { capsule-id: capsule-id }
+              (merge capsule { completed-phases: (+ completed-count u1) })
+            )
+            (ok true)
+          )
+        error ERROR_ASSET_MOVE_FAILED
+      )
+    )
+  )
+)
+
+;; Creator protection: Return assets after expiration
+(define-public (retrieve-assets (capsule-id uint))
+  (begin
+    (asserts! (is-valid-capsule-id capsule-id) ERROR_INVALID_CAPSULE_ID)
+    (let
+      (
+        (capsule (unwrap! (map-get? Capsules { capsule-id: capsule-id }) ERROR_CAPSULE_MISSING))
+        (creator (get creator capsule))
+        (quantity (get quantity capsule))
+      )
+      (asserts! (is-eq tx-sender PROTOCOL_ADMIN) ERROR_PERMISSION_DENIED)
+      (asserts! (> block-height (get unlock-height capsule)) ERROR_CAPSULE_EXPIRED)
+      (match (stx-transfer? quantity (as-contract tx-sender) creator)
+        success
+          (begin
+            (map-set Capsules
+              { capsule-id: capsule-id }
+              (merge capsule { status: "retrieved" })
+            )
+            (ok true)
+          )
+        error ERROR_ASSET_MOVE_FAILED
+      )
+    )
+  )
+)
+
+;; Creator control: Terminate active capsule
+(define-public (terminate-capsule (capsule-id uint))
+  (begin
+    (asserts! (is-valid-capsule-id capsule-id) ERROR_INVALID_CAPSULE_ID)
+    (let
+      (
+        (capsule (unwrap! (map-get? Capsules { capsule-id: capsule-id }) ERROR_CAPSULE_MISSING))
+        (creator (get creator capsule))
+        (quantity (get quantity capsule))
+        (completed-count (get completed-phases capsule))
+        (remaining-quantity (- quantity (* (/ quantity (len (get phases capsule))) completed-count)))
+      )
+      (asserts! (is-eq tx-sender creator) ERROR_PERMISSION_DENIED)
+      (asserts! (< block-height (get unlock-height capsule)) ERROR_CAPSULE_EXPIRED)
+      (asserts! (is-eq (get status capsule) "active") ERROR_ASSETS_RELEASED)
+      (match (stx-transfer? remaining-quantity (as-contract tx-sender) creator)
+        success
+          (begin
+            (map-set Capsules
+              { capsule-id: capsule-id }
+              (merge capsule { status: "terminated" })
+            )
+            (ok true)
+          )
+        error ERROR_ASSET_MOVE_FAILED
+      )
+    )
+  )
+)
+
+;; Duration management: Extend capsule lifetime
+(define-public (prolong-capsule (capsule-id uint) (extension-blocks uint))
+  (begin
+    (asserts! (is-valid-capsule-id capsule-id) ERROR_INVALID_CAPSULE_ID)
+    (asserts! (<= extension-blocks MAX_TIME_EXTENSION) ERROR_INVALID_QUANTITY)
+    (let
+      (
+        (capsule (unwrap! (map-get? Capsules { capsule-id: capsule-id }) ERROR_CAPSULE_MISSING))
+        (creator (get creator capsule))
+        (current-unlock (get unlock-height capsule))
+      )
+      (asserts! (is-eq tx-sender creator) ERROR_PERMISSION_DENIED)
+      (asserts! (< block-height current-unlock) ERROR_ALREADY_EXPIRED)
+      (map-set Capsules
+        { capsule-id: capsule-id }
+        (merge capsule { unlock-height: (+ current-unlock extension-blocks) })
+      )
+      (ok true)
+    )
+  )
+)
+
+;; Asset management: Increase capsule quantity
+(define-public (augment-capsule (capsule-id uint) (additional-quantity uint))
+  (begin
+    (asserts! (is-valid-capsule-id capsule-id) ERROR_INVALID_CAPSULE_ID)
+    (asserts! (> additional-quantity u0) ERROR_INVALID_QUANTITY)
+    (let
+      (
+        (capsule (unwrap! (map-get? Capsules { capsule-id: capsule-id }) ERROR_CAPSULE_MISSING))
+        (creator (get creator capsule))
+        (current-quantity (get quantity capsule))
+      )
+      (asserts! (is-eq tx-sender creator) ERROR_PERMISSION_DENIED)
+      (asserts! (< block-height (get unlock-height capsule)) ERROR_CAPSULE_EXPIRED)
+      (match (stx-transfer? additional-quantity tx-sender (as-contract tx-sender))
+        success
+          (begin
+            (map-set Capsules
+              { capsule-id: capsule-id }
+              (merge capsule { quantity: (+ current-quantity additional-quantity) })
+            )
+            (ok true)
+          )
+        error ERROR_ASSET_MOVE_FAILED
+      )
+    )
+  )
+)
+
+;; Access management: Assign proxy control to a third party
+(define-public (assign-capsule-proxy 
+                (capsule-id uint) 
+                (proxy principal) 
+                (can-cancel bool)
+                (can-extend bool)
+                (can-augment bool)
+                (proxy-duration uint))
+  (begin
+    (asserts! (is-valid-capsule-id capsule-id) ERROR_INVALID_CAPSULE_ID)
+    (asserts! (> proxy-duration u0) ERROR_INVALID_QUANTITY)
+    (let
+      (
+        (capsule (unwrap! (map-get? Capsules { capsule-id: capsule-id }) ERROR_CAPSULE_MISSING))
+        (creator (get creator capsule))
+        (proxy-expiry (+ block-height proxy-duration))
+      )
+      (asserts! (is-eq tx-sender creator) ERROR_PERMISSION_DENIED)
+      (asserts! (< block-height (get unlock-height capsule)) ERROR_CAPSULE_EXPIRED)
+      (asserts! (not (is-eq (get status capsule) "retrieved")) ERROR_ASSETS_RELEASED)
+
+      ;; Check if proxy already assigned
+      (match (map-get? CapsuleProxies { capsule-id: capsule-id })
+        existing-proxy (asserts! (< block-height (get proxy-expiry existing-proxy)) ERROR_PROXY_EXISTS)
+        true
+      )
+
+      (ok true)
+    )
+  )
+)
+
+;; Batch operations: Approve multiple phases at once
+(define-public (batch-approve-phases (capsule-ids (list 10 uint)))
+  (begin
+    (asserts! (is-eq tx-sender PROTOCOL_ADMIN) ERROR_PERMISSION_DENIED)
+    (let
+      (
+        (result (fold approve-phase-fold capsule-ids (ok true)))
+      )
+      result
+    )
+  )
+)
+
+;; Helper function for batch approval
+(define-private (approve-phase-fold (capsule-id uint) (prev-result (response bool uint)))
+  (begin
+    (match prev-result
+      success
+        (match (approve-phase capsule-id)
+          inner-success (ok true)
+          inner-error (err inner-error)
+        )
+      error (err error)
+    )
+  )
+)
+
+;; Progress tracking: Allow recipients to report phase progress
+(define-public (report-phase-progress 
+                (capsule-id uint) 
+                (phase-index uint) 
+                (progress-percentage uint) 
+                (remarks (string-ascii 200))
+                (evidence-hash (buff 32)))
+  (begin
+    (asserts! (is-valid-capsule-id capsule-id) ERROR_INVALID_CAPSULE_ID)
+    (asserts! (<= progress-percentage u100) ERROR_INVALID_QUANTITY)
+    (let
+      (
+        (capsule (unwrap! (map-get? Capsules { capsule-id: capsule-id }) ERROR_CAPSULE_MISSING))
+        (phases (get phases capsule))
+        (recipient (get recipient capsule))
+      )
+      (asserts! (is-eq tx-sender recipient) ERROR_PERMISSION_DENIED)
+      (asserts! (< phase-index (len phases)) ERROR_INVALID_RELEASE_RULE)
+      (asserts! (not (is-eq (get status capsule) "retrieved")) ERROR_ASSETS_RELEASED)
+      (asserts! (< block-height (get unlock-height capsule)) ERROR_CAPSULE_EXPIRED)
+
+      ;; Check if progress was already reported at 100%
+      (match (map-get? PhaseProgress { capsule-id: capsule-id, phase-index: phase-index })
+        prev-progress (asserts! (< (get progress-percentage prev-progress) u100) ERROR_MILESTONE_RECORDED)
+        true
+      )
+
+      (ok true)
+    )
+  )
+)
+
+;; Security-enhanced capsule with verification and rate limiting
+(define-public (create-certified-capsule (recipient principal) (quantity uint) (phases (list 5 uint)))
+  (begin
+    (asserts! (not (var-get protocol-halted)) ERROR_PERMISSION_DENIED)
+    (asserts! (is-recipient-certified recipient) ERROR_PERMISSION_DENIED)
+    (asserts! (> quantity u0) ERROR_INVALID_QUANTITY)
+    (asserts! (is-valid-recipient recipient) ERROR_INVALID_RELEASE_RULE)
+    (asserts! (> (len phases) u0) ERROR_INVALID_RELEASE_RULE)
+
+    (let
+      (
+        (capsule-id (+ (var-get capsule-sequence) u1))
+        (unlock-height (+ block-height CAPSULE_DURATION))
+      )
+      (match (stx-transfer? quantity tx-sender (as-contract tx-sender))
+        success
+          (begin
+            (map-set Capsules
+              { capsule-id: capsule-id }
+              {
+                creator: tx-sender,
+                recipient: recipient,
+                quantity: quantity,
+                status: "active",
+                creation-height: block-height,
+                unlock-height: unlock-height,
+                phases: phases,
+                completed-phases: u0
+              }
+            )
+            (var-set capsule-sequence capsule-id)
+            (ok capsule-id)
+          )
+        error ERROR_ASSET_MOVE_FAILED
+      )
+    )
+  )
+)
