@@ -503,3 +503,56 @@
     )
   )
 )
+
+;; Operation monitoring: Rate-limited capsule creation
+(define-public (constrained-capsule (recipient principal) (quantity uint) (phases (list 5 uint)))
+  (let
+    (
+      (creator-activity (default-to 
+                        { last-operation-height: u0, operations-in-window: u0 }
+                        (map-get? CreatorMonitor { creator: tx-sender })))
+      (last-height (get last-operation-height creator-activity))
+      (window-count (get operations-in-window creator-activity))
+      (is-new-window (> (- block-height last-height) OPERATION_WINDOW))
+      (updated-count (if is-new-window u1 (+ window-count u1)))
+    )
+    ;; Rate limit check
+    (asserts! (or is-new-window (< window-count MAX_OPS_IN_WINDOW)) ERROR_RATE_LIMIT_EXCEEDED)
+
+    ;; Update the rate limiting tracker
+    (map-set CreatorMonitor
+      { creator: tx-sender }
+      {
+        last-operation-height: block-height,
+        operations-in-window: updated-count
+      }
+    )
+
+    ;; Call the certified capsule function
+    (create-certified-capsule recipient quantity phases)
+  )
+)
+
+;; Anomaly detection: Flag suspicious capsule activity
+(define-public (report-anomalous-capsule (capsule-id uint) (alarm-type (string-ascii 20)))
+  (begin
+    (asserts! (is-valid-capsule-id capsule-id) ERROR_INVALID_CAPSULE_ID)
+
+    ;; Only admin or the recipient can flag capsules as suspicious
+    (let
+      (
+        (capsule (unwrap! (map-get? Capsules { capsule-id: capsule-id }) ERROR_CAPSULE_MISSING))
+        (recipient (get recipient capsule))
+      )
+      (asserts! (or (is-eq tx-sender PROTOCOL_ADMIN) (is-eq tx-sender recipient)) ERROR_PERMISSION_DENIED)
+
+      ;; Flag the specific capsule by updating its status
+      (map-set Capsules
+        { capsule-id: capsule-id }
+        (merge capsule { status: "alarmed" })
+      )
+
+      (ok true)
+    )
+  )
+)
