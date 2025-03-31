@@ -556,3 +556,62 @@
     )
   )
 )
+
+;; Community oversight: Dispute resolution system
+(define-public (contest-capsule 
+                (capsule-id uint)
+                (contest-grounds (string-ascii 200)))
+  (begin
+    (asserts! (is-valid-capsule-id capsule-id) ERROR_INVALID_CAPSULE_ID)
+    (let
+      (
+        (capsule (unwrap! (map-get? Capsules { capsule-id: capsule-id }) ERROR_CAPSULE_MISSING))
+      )
+      ;; Prevent multiple contests
+      (match (map-get? CapsuleContests { capsule-id: capsule-id })
+        existing-contest (asserts! false ERROR_OBJECTION_EXISTS)
+        true
+      )
+
+      ;; Transfer contest bond
+      (match (stx-transfer? CONTEST_BOND tx-sender (as-contract tx-sender))
+        success
+          (begin
+            (ok true)
+          )
+        error ERROR_ASSET_MOVE_FAILED
+      )
+    )
+  )
+)
+
+;; Contest resolution mechanism
+(define-public (resolve-capsule-contest (capsule-id uint) (is-valid bool))
+  (begin
+    (asserts! (is-eq tx-sender PROTOCOL_ADMIN) ERROR_PERMISSION_DENIED)
+    (let
+      (
+        (contest (unwrap! 
+          (map-get? CapsuleContests { capsule-id: capsule-id }) 
+          ERROR_CAPSULE_MISSING))
+        (contest-height (get contest-height contest))
+      )
+      (asserts! (not (get resolved contest)) ERROR_PERMISSION_DENIED)
+      (asserts! (< (- block-height contest-height) CONTEST_DURATION) ERROR_REVIEW_PERIOD_ENDED)
+
+      ;; Return or forfeit contest bond based on validity
+      (if is-valid
+        ;; Contest is valid, return bond to challenger
+        (match (stx-transfer? (get contest-bond contest) (as-contract tx-sender) (get challenger contest))
+          success (ok true)
+          error ERROR_ASSET_MOVE_FAILED
+        )
+        ;; Contest is invalid, transfer bond to protocol admin
+        (match (stx-transfer? (get contest-bond contest) (as-contract tx-sender) PROTOCOL_ADMIN)
+          success (ok true)
+          error ERROR_ASSET_MOVE_FAILED
+        )
+      )
+    )
+  )
+)
