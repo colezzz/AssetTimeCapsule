@@ -38,3 +38,201 @@
 (define-constant CONTEST_DURATION u1008) 
 (define-constant CONTEST_BOND u1000000) 
 
+
+;; Main capsule registry
+(define-map Capsules
+  { capsule-id: uint }
+  {
+    creator: principal,
+    recipient: principal,
+    quantity: uint,
+    status: (string-ascii 10),
+    creation-height: uint,
+    unlock-height: uint,
+    phases: (list 5 uint),
+    completed-phases: uint
+  }
+)
+
+(define-data-var capsule-sequence uint u0)
+
+;; Multi-recipient capsule structure
+(define-map MultiCapsules
+  { multi-capsule-id: uint }
+  {
+    creator: principal,
+    targets: (list 5 { recipient: principal, portion: uint }),
+    total-quantity: uint,
+    creation-height: uint,
+    status: (string-ascii 10)
+  }
+)
+
+(define-data-var multi-capsule-sequence uint u0)
+
+;; Verified recipient directory
+(define-map CertifiedRecipients
+  { recipient: principal }
+  { certified: bool }
+)
+
+;; Milestone tracking system
+(define-map PhaseProgress
+  { capsule-id: uint, phase-index: uint }
+  {
+    progress-percentage: uint,
+    remarks: (string-ascii 200),
+    update-height: uint,
+    evidence-hash: (buff 32)
+  }
+)
+
+;; Authority delegation records
+(define-map CapsuleProxies
+  { capsule-id: uint }
+  {
+    proxy: principal,
+    can-cancel: bool,
+    can-extend: bool,
+    can-augment: bool,
+    proxy-expiry: uint
+  }
+)
+
+;; Unusual activity tracker
+(define-map AlarmCapsules
+  { capsule-id: uint }
+  { 
+    alarm-type: (string-ascii 20),
+    reported-by: principal,
+    resolved: bool
+  }
+)
+
+;; Creator activity monitoring
+(define-map CreatorMonitor
+  { creator: principal }
+  {
+    last-operation-height: uint,
+    operations-in-window: uint
+  }
+)
+
+;; Dispute management system
+(define-map CapsuleContests
+  { capsule-id: uint }
+  {
+    challenger: principal,
+    contest-grounds: (string-ascii 200),
+    contest-bond: uint,
+    resolved: bool,
+    upheld: bool,
+    contest-height: uint
+  }
+)
+
+;; Emergency retrieval mechanism
+(define-map RetrievalRequests
+  { capsule-id: uint }
+  { 
+    admin-confirmed: bool,
+    creator-confirmed: bool,
+    justification: (string-ascii 100)
+  }
+)
+
+;; Protocol state
+(define-data-var protocol-halted bool false)
+
+;; Utility functions
+(define-private (is-valid-recipient (recipient principal))
+  (not (is-eq recipient tx-sender))
+)
+
+(define-private (is-valid-capsule-id (capsule-id uint))
+  (<= capsule-id (var-get capsule-sequence))
+)
+
+(define-private (get-portion-value (target { recipient: principal, portion: uint }))
+  (get portion target)
+)
+
+;; Query functions
+(define-read-only (is-recipient-certified (recipient principal))
+  (default-to false (get certified (map-get? CertifiedRecipients { recipient: recipient })))
+)
+
+;; Primary feature: Create a new phase-based asset time capsule
+(define-public (create-capsule (recipient principal) (quantity uint) (phases (list 5 uint)))
+  (let
+    (
+      (capsule-id (+ (var-get capsule-sequence) u1))
+      (unlock-height (+ block-height CAPSULE_DURATION))
+    )
+    (asserts! (> quantity u0) ERROR_INVALID_QUANTITY)
+    (asserts! (is-valid-recipient recipient) ERROR_INVALID_RELEASE_RULE)
+    (asserts! (> (len phases) u0) ERROR_INVALID_RELEASE_RULE)
+    (match (stx-transfer? quantity tx-sender (as-contract tx-sender))
+      success
+        (begin
+          (map-set Capsules
+            { capsule-id: capsule-id }
+            {
+              creator: tx-sender,
+              recipient: recipient,
+              quantity: quantity,
+              status: "active",
+              creation-height: block-height,
+              unlock-height: unlock-height,
+              phases: phases,
+              completed-phases: u0
+            }
+          )
+          (var-set capsule-sequence capsule-id)
+          (ok capsule-id)
+        )
+      error ERROR_ASSET_MOVE_FAILED
+    )
+  )
+)
+
+;; Enhanced feature: Create a multi-recipient capsule with proportional distribution
+(define-public (create-multi-capsule (targets (list 5 { recipient: principal, portion: uint })) (quantity uint))
+  (begin
+    (asserts! (> quantity u0) ERROR_INVALID_QUANTITY)
+    (asserts! (> (len targets) u0) ERROR_INVALID_CAPSULE_ID)
+    (asserts! (<= (len targets) MAX_RECIPIENTS) ERROR_RECIPIENT_CAP)
+
+    ;; Verify portion allocation totals 100%
+    (let
+      (
+        (total-portion (fold + (map get-portion-value targets) u0))
+      )
+      (asserts! (is-eq total-portion u100) ERROR_DISTRIBUTION_MISMATCH)
+
+      ;; Process the capsule creation
+      (match (stx-transfer? quantity tx-sender (as-contract tx-sender))
+        success
+          (let
+            (
+              (capsule-id (+ (var-get multi-capsule-sequence) u1))
+            )
+            (map-set MultiCapsules
+              { multi-capsule-id: capsule-id }
+              {
+                creator: tx-sender,
+                targets: targets,
+                total-quantity: quantity,
+                creation-height: block-height,
+                status: "active"
+              }
+            )
+            (var-set multi-capsule-sequence capsule-id)
+            (ok capsule-id)
+          )
+        error ERROR_ASSET_MOVE_FAILED
+      )
+    )
+  )
+)
+
