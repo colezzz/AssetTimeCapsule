@@ -294,3 +294,55 @@
   )
 )
 
+;; Creator control: Terminate active capsule
+(define-public (terminate-capsule (capsule-id uint))
+  (begin
+    (asserts! (is-valid-capsule-id capsule-id) ERROR_INVALID_CAPSULE_ID)
+    (let
+      (
+        (capsule (unwrap! (map-get? Capsules { capsule-id: capsule-id }) ERROR_CAPSULE_MISSING))
+        (creator (get creator capsule))
+        (quantity (get quantity capsule))
+        (completed-count (get completed-phases capsule))
+        (remaining-quantity (- quantity (* (/ quantity (len (get phases capsule))) completed-count)))
+      )
+      (asserts! (is-eq tx-sender creator) ERROR_PERMISSION_DENIED)
+      (asserts! (< block-height (get unlock-height capsule)) ERROR_CAPSULE_EXPIRED)
+      (asserts! (is-eq (get status capsule) "active") ERROR_ASSETS_RELEASED)
+      (match (stx-transfer? remaining-quantity (as-contract tx-sender) creator)
+        success
+          (begin
+            (map-set Capsules
+              { capsule-id: capsule-id }
+              (merge capsule { status: "terminated" })
+            )
+            (ok true)
+          )
+        error ERROR_ASSET_MOVE_FAILED
+      )
+    )
+  )
+)
+
+;; Duration management: Extend capsule lifetime
+(define-public (prolong-capsule (capsule-id uint) (extension-blocks uint))
+  (begin
+    (asserts! (is-valid-capsule-id capsule-id) ERROR_INVALID_CAPSULE_ID)
+    (asserts! (<= extension-blocks MAX_TIME_EXTENSION) ERROR_INVALID_QUANTITY)
+    (let
+      (
+        (capsule (unwrap! (map-get? Capsules { capsule-id: capsule-id }) ERROR_CAPSULE_MISSING))
+        (creator (get creator capsule))
+        (current-unlock (get unlock-height capsule))
+      )
+      (asserts! (is-eq tx-sender creator) ERROR_PERMISSION_DENIED)
+      (asserts! (< block-height current-unlock) ERROR_ALREADY_EXPIRED)
+      (map-set Capsules
+        { capsule-id: capsule-id }
+        (merge capsule { unlock-height: (+ current-unlock extension-blocks) })
+      )
+      (ok true)
+    )
+  )
+)
+
