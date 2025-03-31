@@ -236,3 +236,61 @@
   )
 )
 
+
+;; Phase management: Approve phase completion and release assets
+(define-public (approve-phase (capsule-id uint))
+  (begin
+    (asserts! (is-valid-capsule-id capsule-id) ERROR_INVALID_CAPSULE_ID)
+    (let
+      (
+        (capsule (unwrap! (map-get? Capsules { capsule-id: capsule-id }) ERROR_CAPSULE_MISSING))
+        (phases (get phases capsule))
+        (completed-count (get completed-phases capsule))
+        (recipient (get recipient capsule))
+        (total-quantity (get quantity capsule))
+        (release-amount (/ total-quantity (len phases)))
+      )
+      (asserts! (< completed-count (len phases)) ERROR_ASSETS_RELEASED)
+      (asserts! (is-eq tx-sender PROTOCOL_ADMIN) ERROR_PERMISSION_DENIED)
+      (match (stx-transfer? release-amount (as-contract tx-sender) recipient)
+        success
+          (begin
+            (map-set Capsules
+              { capsule-id: capsule-id }
+              (merge capsule { completed-phases: (+ completed-count u1) })
+            )
+            (ok true)
+          )
+        error ERROR_ASSET_MOVE_FAILED
+      )
+    )
+  )
+)
+
+;; Creator protection: Return assets after expiration
+(define-public (retrieve-assets (capsule-id uint))
+  (begin
+    (asserts! (is-valid-capsule-id capsule-id) ERROR_INVALID_CAPSULE_ID)
+    (let
+      (
+        (capsule (unwrap! (map-get? Capsules { capsule-id: capsule-id }) ERROR_CAPSULE_MISSING))
+        (creator (get creator capsule))
+        (quantity (get quantity capsule))
+      )
+      (asserts! (is-eq tx-sender PROTOCOL_ADMIN) ERROR_PERMISSION_DENIED)
+      (asserts! (> block-height (get unlock-height capsule)) ERROR_CAPSULE_EXPIRED)
+      (match (stx-transfer? quantity (as-contract tx-sender) creator)
+        success
+          (begin
+            (map-set Capsules
+              { capsule-id: capsule-id }
+              (merge capsule { status: "retrieved" })
+            )
+            (ok true)
+          )
+        error ERROR_ASSET_MOVE_FAILED
+      )
+    )
+  )
+)
+
